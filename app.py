@@ -5,7 +5,7 @@ from io import BytesIO
 
 # --- 页面配置 ---
 st.set_page_config(page_title="ABC", layout="wide") 
-st.title("ABC 排单系统 (带汇总复核 + 可视化)")
+st.title("ABC 排单系统 (汇总自动求和版)")
 
 # --- 侧边栏：账号设置 ---
 with st.sidebar:
@@ -23,10 +23,9 @@ with st.sidebar:
 
     st.header("2. 说明")
     st.markdown("""
-    **功能更新：**
-    - 最后增加【汇总复核】Sheet。
-    - 按天分栏显示，不同颜色区分。
-    - 自动统计每日各产品下单总数。
+    **7.0 更新：**
+    - 汇总复核表中，每日底部增加【当日合计】。
+    - 自动计算当天所有产品的下单总数。
     """)
 
 # --- 辅助函数：寻找可用替补 ---
@@ -55,6 +54,7 @@ def generate_smart_schedule(df):
     # 3. 解析任务
     tasks = []
     for _, row in df.iterrows():
+        # 兼容处理，确保读取为字符串
         pid = str(row[0]).strip()
         total_weekly = int(row[1])
         
@@ -125,6 +125,7 @@ uploaded_file = st.file_uploader("📂 上传 Excel 表格 (第一列：产品�
 
 if uploaded_file:
     try:
+        # 这里的 engine='openpyxl' 依赖于 requirements.txt 的更新
         df_input = pd.read_excel(uploaded_file, engine='openpyxl')
         st.write("数据预览：", df_input.head())
         
@@ -133,7 +134,7 @@ if uploaded_file:
                 results = generate_smart_schedule(df_input)
                 
             if results:
-                st.success("✅ 排程完成！正在生成带汇总表的文件...")
+                st.success("✅ 排程完成！汇总表底部已添加总计。")
                 
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -142,10 +143,13 @@ if uploaded_file:
                     # --- 样式定义 ---
                     center_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter'})
                     
-                    # 定义6种淡色背景，用于区分周一到周六
+                    # 6种淡色背景
                     colors = ['#E6F3FF', '#E6FFFA', '#F0FFF0', '#FFFFE0', '#FFF0F5', '#F5F5F5']
                     color_formats = [workbook.add_format({'align': 'center', 'valign': 'vcenter', 'bg_color': c, 'border': 1}) for c in colors]
+                    # 表头格式 (加粗)
                     header_formats = [workbook.add_format({'align': 'center', 'valign': 'vcenter', 'bold': True, 'bg_color': c, 'border': 1}) for c in colors]
+                    # 总计行格式 (加粗，红色字，显眼)
+                    total_formats = [workbook.add_format({'align': 'center', 'valign': 'vcenter', 'bold': True, 'bg_color': c, 'border': 1, 'font_color': '#FF0000'}) for c in colors]
 
                     # 1. 生成每日明细 Sheet
                     days_list = ["周一", "周二", "周三", "周四", "周五", "周六"]
@@ -168,43 +172,47 @@ if uploaded_file:
                         raw_data = results[day]
                         
                         if raw_data:
-                            # 统计当天每个产品的单量
+                            # 统计
                             df_temp = pd.DataFrame(raw_data)
-                            # 聚合统计：按产品编号计数
                             summary_df = df_temp['产品编号'].value_counts().reset_index()
                             summary_df.columns = ['产品编号', '当日总单量']
                             summary_df = summary_df.sort_values(by='产品编号')
                             
-                            # 写入表头 (3列: 日期, 产品, 单量)
+                            # 写入表头
                             summary_sheet.write(0, current_col, "日期", header_formats[i])
                             summary_sheet.write(0, current_col+1, "产品编号", header_formats[i])
                             summary_sheet.write(0, current_col+2, "当日总单量", header_formats[i])
                             
-                            # 写入数据
+                            # 写入数据行
                             for row_idx, row_data in summary_df.iterrows():
-                                # A列：写入日期文本
                                 summary_sheet.write(row_idx+1, current_col, day, color_formats[i])
-                                # B列：产品编号
                                 summary_sheet.write(row_idx+1, current_col+1, row_data['产品编号'], color_formats[i])
-                                # C列：单量
                                 summary_sheet.write(row_idx+1, current_col+2, row_data['当日总单量'], color_formats[i])
-                                
+                            
+                            # 【新增功能】写入底部总计
+                            total_row_idx = len(summary_df) + 1
+                            day_total_sum = summary_df['当日总单量'].sum()
+                            
+                            # 写入 "合计" (居中)
+                            summary_sheet.write(total_row_idx, current_col + 1, "当日合计", header_formats[i])
+                            # 写入 数字 (居中，红字加粗)
+                            summary_sheet.write(total_row_idx, current_col + 2, day_total_sum, total_formats[i])
+
                             # 设置列宽
                             summary_sheet.set_column(current_col, current_col+2, 15)
                             
                         else:
-                            # 如果某天没数据，也占个位
                             summary_sheet.write(0, current_col, day + " (无数据)", header_formats[i])
                         
-                        # 向右移动4列（留1列空白间隔，或者紧挨着? 你要求D/E/F，所以是紧挨着）
-                        # A,B,C -> 0,1,2. 下一次从 3 (D) 开始
+                        # 向右移动3列
                         current_col += 3
 
                 st.download_button(
-                    label="📥 下载 ABC 最终排程表 (含汇总)",
+                    label="📥 下载 ABC 最终排程表 (含总计)",
                     data=output.getvalue(),
-                    file_name="ABC_Final_Schedule.xlsx",
+                    file_name="ABC_Final_Schedule_Total.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
     except Exception as e:
+        # 这里会捕捉报错并显示出来，如果还报错，请截图这里
         st.error(f"程序出错: {e}")
