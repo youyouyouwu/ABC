@@ -4,7 +4,6 @@ import random
 from io import BytesIO
 
 # --- 页面配置 ---
-# 这里改成了 ABC
 st.set_page_config(page_title="ABC", layout="wide") 
 st.title("ABC 排单系统")
 
@@ -17,7 +16,7 @@ with st.sidebar:
     
     # 生成账号池
     main_accounts = list(range(main_start, main_end + 1))
-    backup_accounts = list(range(backup_start, backup_start + 20)) # 默认生成20个替补
+    backup_accounts = list(range(backup_start, backup_start + 20)) 
     
     st.info(f"当前主力号：{len(main_accounts)} 个\n当前替补号：{len(backup_accounts)} 个")
 
@@ -33,17 +32,15 @@ with st.sidebar:
 def generate_smart_schedule(df):
     days = ["周一", "周二", "周三", "周四", "周五", "周六"]
     
-    # 1. 建立全局历史记录 (防止一周内账号重复买同一产品)
-    # 格式: {账号ID: {'C001', 'C002'...}}
+    # 1. 建立全局历史记录
     global_history = {acc: set() for acc in main_accounts}
     
     # 2. 准备结果容器
     schedule_results = {day: [] for day in days}
     
-    # 3. 解析任务 (产品编号, 周总单量)
+    # 3. 解析任务
     tasks = []
     for _, row in df.iterrows():
-        # 兼容处理：无论Excel里是数字还是文本，都转成字符串去除空格
         pid = str(row[0]).strip()
         total_weekly = int(row[1])
         
@@ -60,7 +57,6 @@ def generate_smart_schedule(df):
     # 4. 开始按天循环分配
     for day_idx, day_name in enumerate(days):
         
-        # 每日负载记录
         daily_load = {acc: 0 for acc in main_accounts}
         
         for task in tasks:
@@ -77,7 +73,7 @@ def generate_smart_schedule(df):
                 
             # --- 分配账号 ---
             for _ in range(needed_today):
-                # 规则1：没买过
+                # 规则1：本周没买过
                 candidates = [acc for acc in main_accounts if pid not in global_history[acc]]
                 
                 if not candidates:
@@ -113,32 +109,43 @@ def generate_smart_schedule(df):
 uploaded_file = st.file_uploader("📂 上传 Excel 表格 (第一列：产品编号，第二列：周总单量)", type=["xlsx"])
 
 if uploaded_file:
-    df_input = pd.read_excel(uploaded_file)
-    st.write("数据预览：", df_input.head())
-    
-    if st.button("🚀 开始计算并生成排期"):
-        with st.spinner('正在计算最优排程...'):
-            results = generate_smart_schedule(df_input)
-            
-        if results:
-            st.success("✅ 排程完成！请下载结果：")
-            
-            # 创建 Excel 下载
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                for day in ["周一", "周二", "周三", "周四", "周五", "周六"]:
-                    df_day = pd.DataFrame(results[day])
-                    
-                    if not df_day.empty:
-                        # 排序
-                        df_day = df_day.sort_values(by="产品编号")
-                        df_day.to_excel(writer, sheet_name=day, index=False)
-                    else:
-                        pd.DataFrame(columns=["产品编号","周待补单量","主力账号","替补账号"]).to_excel(writer, sheet_name=day, index=False)
-            
-            st.download_button(
-                label="📥 下载 ABC 排程结果 (Excel)",
-                data=output.getvalue(),
-                file_name="ABC_Schedule.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+    try:
+        # engine='openpyxl' 确保兼容性
+        df_input = pd.read_excel(uploaded_file, engine='openpyxl')
+        st.write("数据预览：", df_input.head())
+        
+        if st.button("🚀 开始计算并生成排期"):
+            with st.spinner('正在计算最优排程...'):
+                results = generate_smart_schedule(df_input)
+                
+            if results:
+                st.success("✅ 排程完成！请下载结果：")
+                
+                # 创建 Excel 下载
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    for day in ["周一", "周二", "周三", "周四", "周五", "周六"]:
+                        df_day = pd.DataFrame(results[day])
+                        
+                        if not df_day.empty:
+                            # 1. 排序
+                            df_day = df_day.sort_values(by="产品编号")
+                            
+                            # 2. 【核心修改】插入纯数字序号 (1, 2, 3...)
+                            # range(1, N) 生成的就是纯阿拉伯数字
+                            df_day.insert(0, "序号", range(1, 1 + len(df_day)))
+                            
+                            # 3. 写入 Excel
+                            df_day.to_excel(writer, sheet_name=day, index=False)
+                        else:
+                            # 空表头
+                            pd.DataFrame(columns=["序号","产品编号","周待补单量","主力账号","替补账号"]).to_excel(writer, sheet_name=day, index=False)
+                
+                st.download_button(
+                    label="📥 下载 ABC 排程结果 (Excel)",
+                    data=output.getvalue(),
+                    file_name="ABC_Schedule.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+    except Exception as e:
+        st.error(f"读取 Excel 失败，请检查文件格式。错误信息: {e}")
