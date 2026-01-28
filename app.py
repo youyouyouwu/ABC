@@ -7,14 +7,18 @@ import zipfile
 
 # --- 页面配置 ---
 st.set_page_config(page_title="ABC", layout="wide") 
-st.title("ABC 排单系统 (工单汇总颜色版)")
+st.title("ABC 排单系统 (Sheet2表头修正版)")
 
 # --- 侧边栏：设置 ---
 with st.sidebar:
     st.header("1. 日期范围设置")
     today = datetime.today()
+    
+    # 默认跨度为 5天 (即当天+5天=总共6天)
+    default_end = today + timedelta(days=5)
+    
     start_date = st.date_input("开始日期", today)
-    end_date = st.date_input("结束日期", today + timedelta(days=6))
+    end_date = st.date_input("结束日期", default_end)
     
     if start_date > end_date:
         st.error("结束日期必须晚于开始日期！")
@@ -135,7 +139,13 @@ def convert_to_work_order_df(daily_data, product_info_map):
         
         new_row = [
             idx, pid, main_acc,
-            infos[0], infos[1], infos[2], infos[3], infos[4], infos[5], infos[6],
+            infos[0], # 橙火ID
+            infos[1], # PRODUCT ID
+            infos[2], # VENDOR ITEM ID
+            infos[3], # 关键词
+            infos[4], # 品牌名称
+            infos[5], # 最低价
+            infos[6], # 最高价
             "", "", "", ""
         ]
         final_rows.append(new_row)
@@ -231,7 +241,7 @@ if uploaded_file and start_date <= end_date:
                             curr_col += 3
 
                     # ---------------------------------------------------------
-                    # 2. 独立工单 Zip (含 Sheet2 汇总颜色版)
+                    # 2. 独立工单 Zip (视觉增强 + Sheet2 修正版)
                     # ---------------------------------------------------------
                     buffer_zip = BytesIO()
                     with zipfile.ZipFile(buffer_zip, "w") as zf:
@@ -243,11 +253,9 @@ if uploaded_file and start_date <= end_date:
                             df_sheet1 = convert_to_work_order_df(raw_data, product_info_map)
                             
                             # 2. 生成 Sheet2 数据 (聚合)
-                            # 按 '产品代码' 分组
-                            # 逻辑: count '工单号' 作为数量, 其他信息取 first (因为同一产品信息相同)
                             df_sheet2 = df_sheet1.groupby('产品代码', as_index=False).agg({
                                 '工单号': 'count',
-                                '环境序号': lambda x: "", # 强制置空
+                                '环境序号': lambda x: "",
                                 '橙火ID': 'first',
                                 'PRODUCT ID': 'first',
                                 'VENDOR ITEM ID': 'first',
@@ -256,74 +264,83 @@ if uploaded_file and start_date <= end_date:
                                 '最低价': 'first',
                                 '最高价': 'first'
                             })
-                            # 重命名 A 列
-                            df_sheet2.rename(columns={'工单号': '产品数量'}, inplace=True)
                             
-                            # 调整列顺序 (A-J)
-                            target_cols = ['产品数量', '产品代码', '环境序号', '橙火ID', 'PRODUCT ID', 'VENDOR ITEM ID', '关键词', '品牌名称', '最低价', '最高价']
+                            # 【核心修改 1】 重命名 '工单号' -> '产品数量' 和 'VENDOR ITEM ID' -> '自发货ID'
+                            df_sheet2.rename(columns={
+                                '工单号': '产品数量',
+                                'VENDOR ITEM ID': '自发货ID'  # 改名
+                            }, inplace=True)
+                            
+                            # 【核心修改 2】 调整列顺序, 使用新名字 '自发货ID'
+                            target_cols = ['产品数量', '产品代码', '环境序号', '橙火ID', 'PRODUCT ID', '自发货ID', '关键词', '品牌名称', '最低价', '最高价']
                             df_sheet2 = df_sheet2[target_cols]
                             
-                            # 3. 写入 Excel (多 Sheet)
+                            # 3. 写入 Excel
                             buf_single = BytesIO()
                             with pd.ExcelWriter(buf_single, engine='xlsxwriter') as writer:
                                 wb = writer.book
-                                center_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1})
-                                header_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
                                 
-                                # --- 写入 Sheet1 ---
+                                header_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
+                                white_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#FFFFFF'})
+                                gray_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#F2F2F2'})
+                                
+                                # --- Sheet1 ---
                                 df_sheet1.to_excel(writer, sheet_name='Sheet1', index=False)
                                 ws1 = writer.sheets['Sheet1']
-                                ws1.set_column('A:N', 12, center_fmt)
-                                ws1.set_column('D:H', 18, center_fmt)
+                                ws1.set_column('A:N', 12, white_fmt)
+                                ws1.set_column('D:H', 18, white_fmt)
+                                
                                 for c, val in enumerate(df_sheet1.columns):
                                     ws1.write(0, c, val, header_fmt)
+
+                                current_product = None
+                                color_toggle = False
+                                
+                                for r_idx, row in enumerate(df_sheet1.itertuples(), 1):
+                                    product_code = row.产品代码
+                                    if product_code != current_product:
+                                        current_product = product_code
+                                        color_toggle = not color_toggle
                                     
-                                # --- 写入 Sheet2 (汇总 + 颜色) ---
+                                    row_fmt = gray_fmt if color_toggle else white_fmt
+                                    for c_idx, val in enumerate(row[1:]): 
+                                        if pd.isna(val): val = ""
+                                        ws1.write(r_idx, c_idx, val, row_fmt)
+
+                                # --- Sheet2 ---
                                 df_sheet2.to_excel(writer, sheet_name='Sheet2', index=False)
                                 ws2 = writer.sheets['Sheet2']
+                                center_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1})
                                 ws2.set_column('A:J', 15, center_fmt)
                                 
-                                # 定义颜色格式
-                                orange_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#FFC000'}) # 橙色
-                                blue_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#CCECFF'})   # 浅蓝
+                                orange_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#FFC000'}) 
+                                blue_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#CCECFF'})
                                 
-                                # 写表头
                                 for c, val in enumerate(df_sheet2.columns):
                                     ws2.write(0, c, val, header_fmt)
                                     
-                                # 写数据 (应用条件格式)
-                                # D列是索引 3 (橙火ID), F列是索引 5 (VENDOR ITEM ID)
                                 for r_idx, row in enumerate(df_sheet2.itertuples(), 1):
-                                    # 遍历每一列写入
-                                    # row[0]是index, row[1]是A列... row[4]是D列(橙火ID)
-                                    # itertuples 默认 index=True，所以 row[0] 是 pandas index
-                                    # A列: row.产品数量 -> col 0
                                     ws2.write(r_idx, 0, row.产品数量, center_fmt)
                                     ws2.write(r_idx, 1, row.产品代码, center_fmt)
-                                    ws2.write(r_idx, 2, "", center_fmt) # 环境序号为空
+                                    ws2.write(r_idx, 2, "", center_fmt)
                                     
-                                    # D列: 橙火ID (橙色)
                                     val_d = row.橙火ID
                                     fmt_d = orange_fmt if pd.notna(val_d) and str(val_d).strip() != "" else center_fmt
                                     ws2.write(r_idx, 3, val_d, fmt_d)
                                     
-                                    ws2.write(r_idx, 4, getattr(row, "_5"), center_fmt) # PRODUCT ID (因为中间有空格pandas可能会重命名属性，用位置更稳妥) -> 其实itertuples属性名会自动处理空格，这里 PRODUCT ID 会变成 _4 或类似
-                                    
-                                    # 为保险起见，不通过属性名，通过 iloc 对应的值写入
-                                    # df_sheet2.iloc[r_idx-1, 4] 是 PRODUCT ID
+                                    # PRODUCT ID
+                                    # df_sheet2.iloc[r_idx-1, 4] -> PRODUCT ID
                                     ws2.write(r_idx, 4, df_sheet2.iloc[r_idx-1, 4], center_fmt)
                                     
-                                    # F列: VENDOR ITEM ID (浅蓝)
-                                    val_f = df_sheet2.iloc[r_idx-1, 5]
+                                    # 【核心修改 3】 F列: 自发货ID (原 VENDOR ITEM ID)
+                                    val_f = df_sheet2.iloc[r_idx-1, 5] 
                                     fmt_f = blue_fmt if pd.notna(val_f) and str(val_f).strip() != "" else center_fmt
                                     ws2.write(r_idx, 5, val_f, fmt_f)
                                     
-                                    # G-J列
                                     ws2.write(r_idx, 6, df_sheet2.iloc[r_idx-1, 6], center_fmt)
                                     ws2.write(r_idx, 7, df_sheet2.iloc[r_idx-1, 7], center_fmt)
                                     ws2.write(r_idx, 8, df_sheet2.iloc[r_idx-1, 8], center_fmt)
                                     ws2.write(r_idx, 9, df_sheet2.iloc[r_idx-1, 9], center_fmt)
-
                             
                             file_name = format_date_str(date_obj) + ".xlsx"
                             zf.writestr(file_name, buf_single.getvalue())
@@ -344,7 +361,7 @@ if uploaded_file and start_date <= end_date:
                             data=buffer_zip.getvalue(),
                             file_name="ABC_Daily_Work_Orders.zip",
                             mime="application/zip",
-                            help="每天独立文件，含Sheet1工单和Sheet2汇总"
+                            help="Sheet1灰白分段，Sheet2 F列为自发货ID"
                         )
 
     except Exception as e:
