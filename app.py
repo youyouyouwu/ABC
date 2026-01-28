@@ -7,7 +7,7 @@ import zipfile
 
 # --- 页面配置 ---
 st.set_page_config(page_title="ABC", layout="wide") 
-st.title("ABC 排单系统 (全面视觉升级版)")
+st.title("ABC 排单系统 (财务汇总版)")
 
 # --- 侧边栏：设置 ---
 with st.sidebar:
@@ -134,7 +134,11 @@ def convert_to_work_order_df(daily_data, product_info_map):
     for idx, row in enumerate(df_base.itertuples(), 1):
         pid = row.产品编号
         main_acc = row.主力账号
-        infos = product_info_map.get(pid, [""] * 7)
+        
+        # 获取基础信息
+        info_data = product_info_map.get(pid, {})
+        # info_list 是 B-H 列 (7个)
+        infos = info_data.get('details', [""] * 7)
         if len(infos) < 7: infos += [""] * (7 - len(infos))
         
         new_row = [
@@ -177,10 +181,23 @@ if uploaded_file and start_date <= end_date:
             st.subheader("2. 信息表预览 (Sheet2)")
             st.dataframe(df_details, use_container_width=True, height=200)
             
+            # 【核心修改】读取 I 列 (金额)
+            # 建立更详细的字典: {产品: {'details': [B-H], 'price': I列数值}}
             product_info_map = {}
             for _, row in df_details.iterrows():
                 p_code = str(row[0]).strip()
-                product_info_map[p_code] = row.iloc[1:8].tolist()
+                # 基础信息 B-H (索引 1-7)
+                details = row.iloc[1:8].tolist()
+                # 价格信息 I (索引 8) - 如果没有则默认为0
+                try:
+                    price_val = float(row.iloc[8])
+                except (IndexError, ValueError):
+                    price_val = 0.0
+                
+                product_info_map[p_code] = {
+                    'details': details,
+                    'price': price_val
+                }
 
             if st.button("🚀 生成排程结果"):
                 with st.spinner('计算中...'):
@@ -190,7 +207,7 @@ if uploaded_file and start_date <= end_date:
                     st.success("计算完成！")
                     
                     # ---------------------------------------------------------
-                    # 1. 纯排单汇总表 (管理用) - 【已添加斑马纹可视化】
+                    # 1. 纯排单汇总表 (管理用) - 【已添加金额汇总】
                     # ---------------------------------------------------------
                     buffer_sched = BytesIO()
                     with pd.ExcelWriter(buffer_sched, engine='xlsxwriter') as writer:
@@ -209,10 +226,15 @@ if uploaded_file and start_date <= end_date:
                                 df_schedule = pd.DataFrame(raw_data).sort_values(by="产品编号")
                                 df_schedule.insert(0, "序号", range(1, 1 + len(df_schedule)))
                                 
+                                # 【核心修改】新增 G 列：金额
+                                # 根据产品编号从 product_info_map 获取价格
+                                df_schedule["金额"] = df_schedule["产品编号"].apply(lambda x: product_info_map.get(x, {}).get('price', 0))
+
                                 # 1. 写入数据
                                 df_schedule.to_excel(writer, sheet_name=day_str, index=False)
                                 ws = writer.sheets[day_str]
-                                ws.set_column('A:F', 15, white_fmt) # 默认宽度
+                                ws.set_column('A:F', 15, white_fmt) 
+                                ws.set_column('G:G', 15, white_fmt) # 金额列
                                 
                                 # 2. 覆盖表头格式
                                 for c, val in enumerate(df_schedule.columns):
@@ -222,9 +244,7 @@ if uploaded_file and start_date <= end_date:
                                 current_product = None
                                 color_toggle = False
                                 
-                                # 遍历行 (df_schedule: 序号, 产品编号, 期间总单量, 主力账号, 替补1, 替补2)
                                 for r_idx, row in enumerate(df_schedule.itertuples(), 1):
-                                    # row[2] 是产品编号 (因为 row[0]=index, row[1]=序号, row[2]=产品编号)
                                     product_code = row.产品编号
                                     
                                     if product_code != current_product:
@@ -233,13 +253,15 @@ if uploaded_file and start_date <= end_date:
                                     
                                     row_fmt = gray_fmt if color_toggle else white_fmt
                                     
-                                    # 写入这一行的所有单元格
+                                    # 写入所有单元格 (A-G)
+                                    # 序号, 产品, 总量, 主力, 替补1, 替补2, 金额
                                     ws.write(r_idx, 0, row.序号, row_fmt)
                                     ws.write(r_idx, 1, row.产品编号, row_fmt)
                                     ws.write(r_idx, 2, row.期间总单量, row_fmt)
                                     ws.write(r_idx, 3, row.主力账号, row_fmt)
                                     ws.write(r_idx, 4, row.替补账号1, row_fmt)
                                     ws.write(r_idx, 5, row.替补账号2, row_fmt)
+                                    ws.write(r_idx, 6, row.金额, row_fmt) # 新增金额列写入
                                     
                             else:
                                 pd.DataFrame().to_excel(writer, sheet_name=day_str)
@@ -268,19 +290,33 @@ if uploaded_file and start_date <= end_date:
                                 ws_summary.write(0, curr_col+1, "产品编号", h_fmt)
                                 ws_summary.write(0, curr_col+2, "当日总单量", h_fmt)
                                 
+                                daily_total_money = 0
+                                
                                 for r_idx, r_dat in sum_df.iterrows():
+                                    pid = r_dat['产品编号']
+                                    qty = r_dat['当日总单量']
+                                    price = product_info_map.get(pid, {}).get('price', 0)
+                                    daily_total_money += (qty * price)
+                                    
                                     ws_summary.write(r_idx+1, curr_col, day_str, c_fmt)
-                                    ws_summary.write(r_idx+1, curr_col+1, r_dat['产品编号'], c_fmt)
-                                    ws_summary.write(r_idx+1, curr_col+2, r_dat['当日总单量'], c_fmt)
+                                    ws_summary.write(r_idx+1, curr_col+1, pid, c_fmt)
+                                    ws_summary.write(r_idx+1, curr_col+2, qty, c_fmt)
                                 
                                 total_row = len(sum_df) + 1
+                                # 写入当日合计 (数量)
                                 ws_summary.write(total_row, curr_col+1, "当日合计", h_fmt)
                                 ws_summary.write(total_row, curr_col+2, sum_df['当日总单量'].sum(), tot_fmt)
+                                
+                                # 【核心修改】写入总金额 (换一行)
+                                money_row = total_row + 1
+                                ws_summary.write(money_row, curr_col+1, "总金额", h_fmt)
+                                ws_summary.write(money_row, curr_col+2, daily_total_money, tot_fmt)
+                                
                                 ws_summary.set_column(curr_col, curr_col+2, 16)
                             curr_col += 3
 
                     # ---------------------------------------------------------
-                    # 2. 独立工单 Zip (视觉增强 + Sheet2 修正版)
+                    # 2. 独立工单 Zip
                     # ---------------------------------------------------------
                     buffer_zip = BytesIO()
                     with zipfile.ZipFile(buffer_zip, "w") as zf:
