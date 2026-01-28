@@ -2,14 +2,30 @@ import streamlit as st
 import pandas as pd
 import random
 from io import BytesIO
+from datetime import datetime, timedelta
 
 # --- 页面配置 ---
 st.set_page_config(page_title="ABC", layout="wide") 
-st.title("ABC 排单系统 (汇总自动求和版)")
+st.title("ABC 排单系统 (自定义日期版)")
 
-# --- 侧边栏：账号设置 ---
+# --- 侧边栏：设置 ---
 with st.sidebar:
-    st.header("1. 账号范围设置")
+    st.header("1. 日期范围设置")
+    # 默认今天开始，往后排7天
+    today = datetime.today()
+    start_date = st.date_input("开始日期", today)
+    end_date = st.date_input("结束日期", today + timedelta(days=6))
+    
+    if start_date > end_date:
+        st.error("结束日期必须晚于开始日期！")
+        
+    # 计算所有日期列表
+    delta = (end_date - start_date).days + 1
+    date_list = [start_date + timedelta(days=i) for i in range(delta)]
+    
+    st.success(f"已选择排单天数：{len(date_list)} 天")
+
+    st.header("2. 账号范围设置")
     main_start = st.number_input("主力账号起始", value=1)
     main_end = st.number_input("主力账号结束", value=180)
     backup_start = st.number_input("替补账号起始", value=181)
@@ -19,14 +35,7 @@ with st.sidebar:
     main_accounts = list(range(main_start, main_end + 1))
     backup_accounts = list(range(backup_start, backup_start + backup_count))
     
-    st.info(f"当前主力号：{len(main_accounts)} 个\n当前替补号：{len(backup_accounts)} 个")
-
-    st.header("2. 说明")
-    st.markdown("""
-    **7.0 更新：**
-    - 汇总复核表中，每日底部增加【当日合计】。
-    - 自动计算当天所有产品的下单总数。
-    """)
+    st.info(f"主力号：{len(main_accounts)} 个 | 替补号：{len(backup_accounts)} 个")
 
 # --- 辅助函数：寻找可用替补 ---
 def find_valid_backup(start_index, backup_pool, history, pid, exclude_acc=None):
@@ -40,42 +49,52 @@ def find_valid_backup(start_index, backup_pool, history, pid, exclude_acc=None):
             return candidate
     return None
 
+# --- 辅助函数：格式化日期显示 ---
+def format_date_sheet_name(d):
+    # 返回格式：10-24 (周四)
+    weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    return f"{d.strftime('%m-%d')} ({weekdays[d.weekday()]})"
+
 # --- 核心逻辑函数 ---
-def generate_smart_schedule(df):
-    days = ["周一", "周二", "周三", "周四", "周五", "周六"]
-    
+def generate_smart_schedule(df, target_dates):
     # 1. 建立全局历史记录
     all_accounts = main_accounts + backup_accounts
     global_history = {acc: set() for acc in all_accounts}
     
-    # 2. 准备结果容器
-    schedule_results = {day: [] for day in days}
+    # 2. 准备结果容器 (使用格式化后的日期作为Key)
+    schedule_results = {}
+    for d in target_dates:
+        schedule_results[format_date_sheet_name(d)] = []
     
     # 3. 解析任务
     tasks = []
     for _, row in df.iterrows():
-        # 兼容处理，确保读取为字符串
         pid = str(row[0]).strip()
-        total_weekly = int(row[1])
+        total_qty = int(row[1])
         
-        if total_weekly > len(main_accounts):
-            st.error(f"错误：产品 {pid} 的周单量 ({total_weekly}) 超过了主力账号总数，无法分配不重复主力！")
+        if total_qty > len(main_accounts):
+            st.error(f"错误：产品 {pid} 的总单量 ({total_qty}) 超过了主力账号总数，无法分配不重复主力！")
             return None
             
-        tasks.append({'id': pid, 'total': total_weekly})
+        tasks.append({'id': pid, 'total': total_qty})
 
     random.shuffle(tasks)
 
     # 4. 按天分配
-    for day_idx, day_name in enumerate(days):
+    num_days = len(target_dates)
+    
+    for day_idx, date_obj in enumerate(target_dates):
+        day_key = format_date_sheet_name(date_obj)
         daily_load = {acc: 0 for acc in main_accounts}
         
         for task in tasks:
             pid = task['id']
             total = task['total']
             
-            base = total // 6
-            remainder = total % 6
+            # --- 动态计算每一天的单量 ---
+            # 总量 除以 天数
+            base = total // num_days
+            remainder = total % num_days
             needed_today = base + (1 if day_idx < remainder else 0)
             
             if needed_today == 0:
@@ -85,7 +104,7 @@ def generate_smart_schedule(df):
                 # 选主力
                 candidates = [acc for acc in main_accounts if pid not in global_history[acc]]
                 if not candidates:
-                    st.error(f"无法分配：在 {day_name} 为产品 {pid} 找不到可用主力账号。")
+                    st.error(f"无法分配：在 {day_key} 为产品 {pid} 找不到可用主力账号。")
                     return None
 
                 min_load = min(daily_load[acc] for acc in candidates)
@@ -110,109 +129,102 @@ def generate_smart_schedule(df):
                     chosen_backup2 = backup_accounts[(backup1_real_idx + 1) % len(backup_accounts)]
                 global_history[chosen_backup2].add(pid)
                 
-                schedule_results[day_name].append({
+                schedule_results[day_key].append({
                     "产品编号": pid,
-                    "周待补单量": total,
+                    "期间总单量": total,
                     "主力账号": chosen_main,
                     "替补账号1": chosen_backup1,
                     "替补账号2": chosen_backup2
                 })
 
-    return schedule_results
+    return schedule_results, [format_date_sheet_name(d) for d in target_dates]
 
 # --- 界面交互 ---
-uploaded_file = st.file_uploader("📂 上传 Excel 表格 (第一列：产品编号，第二列：周总单量)", type=["xlsx"])
+uploaded_file = st.file_uploader("📂 上传 Excel 表格 (第一列：产品编号，第二列：期间总单量)", type=["xlsx"])
 
-if uploaded_file:
+if uploaded_file and start_date <= end_date:
     try:
-        # 这里的 engine='openpyxl' 依赖于 requirements.txt 的更新
         df_input = pd.read_excel(uploaded_file, engine='openpyxl')
         st.write("数据预览：", df_input.head())
         
         if st.button("🚀 开始计算并生成排期"):
             with st.spinner('正在计算...'):
-                results = generate_smart_schedule(df_input)
+                # 传入日期列表
+                results, day_keys = generate_smart_schedule(df_input, date_list)
                 
             if results:
-                st.success("✅ 排程完成！汇总表底部已添加总计。")
+                st.success(f"✅ 排程完成！日期范围：{start_date} 至 {end_date}")
                 
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     workbook = writer.book
-                    
-                    # --- 样式定义 ---
                     center_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter'})
                     
-                    # 6种淡色背景
+                    # 颜色定义
                     colors = ['#E6F3FF', '#E6FFFA', '#F0FFF0', '#FFFFE0', '#FFF0F5', '#F5F5F5']
-                    color_formats = [workbook.add_format({'align': 'center', 'valign': 'vcenter', 'bg_color': c, 'border': 1}) for c in colors]
-                    # 表头格式 (加粗)
-                    header_formats = [workbook.add_format({'align': 'center', 'valign': 'vcenter', 'bold': True, 'bg_color': c, 'border': 1}) for c in colors]
-                    # 总计行格式 (加粗，红色字，显眼)
-                    total_formats = [workbook.add_format({'align': 'center', 'valign': 'vcenter', 'bold': True, 'bg_color': c, 'border': 1, 'font_color': '#FF0000'}) for c in colors]
-
+                    
                     # 1. 生成每日明细 Sheet
-                    days_list = ["周一", "周二", "周三", "周四", "周五", "周六"]
-                    for day in days_list:
-                        df_day = pd.DataFrame(results[day])
+                    for d_key in day_keys:
+                        df_day = pd.DataFrame(results[d_key])
                         if not df_day.empty:
                             df_day = df_day.sort_values(by="产品编号")
                             df_day.insert(0, "序号", range(1, 1 + len(df_day)))
-                            df_day.to_excel(writer, sheet_name=day, index=False)
-                            writer.sheets[day].set_column('A:F', 15, center_fmt)
+                            df_day.to_excel(writer, sheet_name=d_key, index=False)
+                            writer.sheets[d_key].set_column('A:F', 15, center_fmt)
                         else:
-                            pd.DataFrame(columns=["序号","产品编号","周待补单量","主力账号","替补账号1","替补账号2"]).to_excel(writer, sheet_name=day, index=False)
+                            # 即使某天没单子，也生成空表
+                            pd.DataFrame(columns=["序号","产品编号","期间总单量","主力账号","替补账号1","替补账号2"]).to_excel(writer, sheet_name=d_key, index=False)
 
                     # 2. 生成【汇总复核】Sheet
                     summary_sheet = workbook.add_worksheet("汇总复核")
                     
                     current_col = 0
-                    for i, day in enumerate(days_list):
-                        # 获取当天数据
-                        raw_data = results[day]
+                    for i, d_key in enumerate(day_keys):
+                        # 循环使用颜色
+                        color_idx = i % len(colors)
+                        bg_color = colors[color_idx]
+                        
+                        header_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'bold': True, 'bg_color': bg_color, 'border': 1})
+                        cell_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'bg_color': bg_color, 'border': 1})
+                        total_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter', 'bold': True, 'bg_color': bg_color, 'border': 1, 'font_color': '#FF0000'})
+
+                        raw_data = results[d_key]
                         
                         if raw_data:
-                            # 统计
                             df_temp = pd.DataFrame(raw_data)
                             summary_df = df_temp['产品编号'].value_counts().reset_index()
                             summary_df.columns = ['产品编号', '当日总单量']
                             summary_df = summary_df.sort_values(by='产品编号')
                             
-                            # 写入表头
-                            summary_sheet.write(0, current_col, "日期", header_formats[i])
-                            summary_sheet.write(0, current_col+1, "产品编号", header_formats[i])
-                            summary_sheet.write(0, current_col+2, "当日总单量", header_formats[i])
+                            # 表头
+                            summary_sheet.write(0, current_col, "日期", header_fmt)
+                            summary_sheet.write(0, current_col+1, "产品编号", header_fmt)
+                            summary_sheet.write(0, current_col+2, "当日总单量", header_fmt)
                             
-                            # 写入数据行
+                            # 数据
                             for row_idx, row_data in summary_df.iterrows():
-                                summary_sheet.write(row_idx+1, current_col, day, color_formats[i])
-                                summary_sheet.write(row_idx+1, current_col+1, row_data['产品编号'], color_formats[i])
-                                summary_sheet.write(row_idx+1, current_col+2, row_data['当日总单量'], color_formats[i])
+                                summary_sheet.write(row_idx+1, current_col, d_key, cell_fmt)
+                                summary_sheet.write(row_idx+1, current_col+1, row_data['产品编号'], cell_fmt)
+                                summary_sheet.write(row_idx+1, current_col+2, row_data['当日总单量'], cell_fmt)
                             
-                            # 【新增功能】写入底部总计
+                            # 底部总计
                             total_row_idx = len(summary_df) + 1
                             day_total_sum = summary_df['当日总单量'].sum()
-                            
-                            # 写入 "合计" (居中)
-                            summary_sheet.write(total_row_idx, current_col + 1, "当日合计", header_formats[i])
-                            # 写入 数字 (居中，红字加粗)
-                            summary_sheet.write(total_row_idx, current_col + 2, day_total_sum, total_formats[i])
+                            summary_sheet.write(total_row_idx, current_col + 1, "当日合计", header_fmt)
+                            summary_sheet.write(total_row_idx, current_col + 2, day_total_sum, total_fmt)
 
-                            # 设置列宽
-                            summary_sheet.set_column(current_col, current_col+2, 15)
+                            summary_sheet.set_column(current_col, current_col+2, 18) # 稍微宽一点适应日期显示
                             
                         else:
-                            summary_sheet.write(0, current_col, day + " (无数据)", header_formats[i])
+                            summary_sheet.write(0, current_col, d_key + " (无数据)", header_fmt)
                         
-                        # 向右移动3列
                         current_col += 3
 
                 st.download_button(
-                    label="📥 下载 ABC 最终排程表 (含总计)",
+                    label="📥 下载 ABC 自定义日期排程表",
                     data=output.getvalue(),
-                    file_name="ABC_Final_Schedule_Total.xlsx",
+                    file_name="ABC_Custom_Schedule.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
     except Exception as e:
-        # 这里会捕捉报错并显示出来，如果还报错，请截图这里
         st.error(f"程序出错: {e}")
