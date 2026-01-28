@@ -7,7 +7,7 @@ import zipfile
 
 # --- 页面配置 ---
 st.set_page_config(page_title="ABC", layout="wide") 
-st.title("ABC 排单系统 (双模式输出版)")
+st.title("ABC 排单系统 (完美分工版)")
 
 # --- 侧边栏：设置 ---
 with st.sidebar:
@@ -56,7 +56,6 @@ def generate_smart_schedule(df_tasks, date_list):
     all_accounts = main_accounts + backup_accounts
     global_history = {acc: set() for acc in all_accounts}
     
-    # 结果容器
     schedule_results = {}
     for d in date_list:
         schedule_results[d] = []
@@ -110,7 +109,6 @@ def generate_smart_schedule(df_tasks, date_list):
                 if not chosen_backup2: chosen_backup2 = backup_accounts[(backup1_real_idx + 1) % len(backup_accounts)]
                 global_history[chosen_backup2].add(pid)
                 
-                # 存入所有信息，方便后续不同表格按需提取
                 schedule_results[date_obj].append({
                     "产品编号": pid,
                     "期间总单量": total,
@@ -121,30 +119,24 @@ def generate_smart_schedule(df_tasks, date_list):
                 
     return schedule_results
 
-# --- 辅助：将基础数据转换为工单格式 (A-N列) ---
+# --- 辅助：转换工单格式 ---
 def convert_to_work_order_df(daily_data, product_info_map):
-    # 1. 排序
     df_base = pd.DataFrame(daily_data)
-    if df_base.empty:
-        return pd.DataFrame()
+    if df_base.empty: return pd.DataFrame()
     
     df_base = df_base.sort_values(by="产品编号")
-    
     final_rows = []
-    # idx 从 1 开始作为工单号
+    
     for idx, row in enumerate(df_base.itertuples(), 1):
         pid = row.产品编号
         main_acc = row.主力账号
-        
-        # 映射 Sheet2 信息 (确保有7个字段)
         infos = product_info_map.get(pid, [""] * 7)
         if len(infos) < 7: infos += [""] * (7 - len(infos))
         
-        # 构造一行
         new_row = [
             idx, pid, main_acc,
             infos[0], infos[1], infos[2], infos[3], infos[4], infos[5], infos[6],
-            "", "", "", "" # K-N 列留空
+            "", "", "", ""
         ]
         final_rows.append(new_row)
         
@@ -172,11 +164,9 @@ if uploaded_file and start_date <= end_date:
             st.write("任务表预览:", df_tasks.head(1))
             st.write("信息表预览:", df_details.head(1))
             
-            # 构建信息字典 {产品: [info1...info7]}
             product_info_map = {}
             for _, row in df_details.iterrows():
                 p_code = str(row[0]).strip()
-                # 取 Sheet2 的 B-H 列 (即索引 1-7)
                 product_info_map[p_code] = row.iloc[1:8].tolist()
 
             if st.button("🚀 生成排程结果"):
@@ -184,42 +174,32 @@ if uploaded_file and start_date <= end_date:
                     results = generate_smart_schedule(df_tasks, date_list)
                 
                 if results:
-                    st.success("计算完成！请选择下载方式：")
+                    st.success("计算完成！")
                     
                     # ---------------------------------------------------------
-                    # 准备下载文件 1: 大汇总 Excel
+                    # 1. 纯排单汇总表 (不含工单)
                     # ---------------------------------------------------------
-                    buffer_big = BytesIO()
-                    with pd.ExcelWriter(buffer_big, engine='xlsxwriter') as writer:
+                    buffer_sched = BytesIO()
+                    with pd.ExcelWriter(buffer_sched, engine='xlsxwriter') as writer:
                         wb = writer.book
                         center_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1})
                         header_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
                         
-                        # 循环每一天
+                        # 每日明细 (仅排单)
                         for date_obj in date_list:
-                            day_str = format_date_str(date_obj)
                             raw_data = results[date_obj]
+                            day_str = format_date_str(date_obj)
                             
-                            if not raw_data: continue
+                            if raw_data:
+                                df_schedule = pd.DataFrame(raw_data).sort_values(by="产品编号")
+                                df_schedule.insert(0, "序号", range(1, 1 + len(df_schedule)))
+                                sheet_name = day_str # 直接用日期做表名，不再加(排单)后缀，因为没有工单表了
+                                df_schedule.to_excel(writer, sheet_name=sheet_name, index=False)
+                                writer.sheets[sheet_name].set_column('A:F', 15, center_fmt)
+                            else:
+                                pd.DataFrame().to_excel(writer, sheet_name=day_str)
 
-                            # 1. 写入排单表 (Sheet: 日期 排单)
-                            df_schedule = pd.DataFrame(raw_data).sort_values(by="产品编号")
-                            df_schedule.insert(0, "序号", range(1, 1 + len(df_schedule)))
-                            sheet_sched = f"{day_str} (排单)"
-                            df_schedule.to_excel(writer, sheet_name=sheet_sched, index=False)
-                            writer.sheets[sheet_sched].set_column('A:F', 15, center_fmt)
-
-                            # 2. 写入工单表 (Sheet: 日期 工单)
-                            df_work = convert_to_work_order_df(raw_data, product_info_map)
-                            sheet_work = f"{day_str} (工单)"
-                            df_work.to_excel(writer, sheet_name=sheet_work, index=False)
-                            ws_work = writer.sheets[sheet_work]
-                            ws_work.set_column('A:N', 12, center_fmt)
-                            ws_work.set_column('D:H', 18, center_fmt) # 信息列宽一点
-                            for c, val in enumerate(df_work.columns):
-                                ws_work.write(0, c, val, header_fmt)
-
-                        # 3. 写入汇总 Sheet
+                        # 汇总复核 Sheet
                         ws_summary = wb.add_worksheet("汇总复核")
                         curr_col = 0
                         colors = ['#E6F3FF', '#E6FFFA', '#F0FFF0', '#FFFFE0', '#FFF0F5', '#F5F5F5']
@@ -252,12 +232,10 @@ if uploaded_file and start_date <= end_date:
                                 ws_summary.write(total_row, curr_col+1, "当日合计", h_fmt)
                                 ws_summary.write(total_row, curr_col+2, sum_df['当日总单量'].sum(), tot_fmt)
                                 ws_summary.set_column(curr_col, curr_col+2, 16)
-                            else:
-                                ws_summary.write(0, curr_col, day_str+"(空)", h_fmt)
                             curr_col += 3
 
                     # ---------------------------------------------------------
-                    # 准备下载文件 2: 独立工单 ZIP
+                    # 2. 独立工单 Zip
                     # ---------------------------------------------------------
                     buffer_zip = BytesIO()
                     with zipfile.ZipFile(buffer_zip, "w") as zf:
@@ -265,10 +243,8 @@ if uploaded_file and start_date <= end_date:
                             raw_data = results[date_obj]
                             if not raw_data: continue
                             
-                            # 生成工单格式 DF
                             df_single = convert_to_work_order_df(raw_data, product_info_map)
                             
-                            # 写入单个 Excel Buffer
                             buf_single = BytesIO()
                             with pd.ExcelWriter(buf_single, engine='xlsxwriter') as writer:
                                 df_single.to_excel(writer, sheet_name='Sheet1', index=False)
@@ -286,24 +262,25 @@ if uploaded_file and start_date <= end_date:
                             zf.writestr(file_name, buf_single.getvalue())
 
                     # ---------------------------------------------------------
-                    # 显示两个下载按钮
+                    # 下载按钮区域
                     # ---------------------------------------------------------
+                    st.markdown("---")
                     col1, col2 = st.columns(2)
                     with col1:
                         st.download_button(
-                            label="📥 方式1: 下载完整大表格 (Excel)",
-                            data=buffer_big.getvalue(),
-                            file_name="ABC_Full_Schedule.xlsx",
+                            label="📄 方式1: 下载排单汇总表 (管理用)",
+                            data=buffer_sched.getvalue(),
+                            file_name="ABC_Schedule_Only.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            help="包含所有日期的排单表、工单表和汇总统计"
+                            help="只包含排单明细 + 汇总统计，不包含工单。"
                         )
                     with col2:
                         st.download_button(
-                            label="📥 方式2: 下载每日独立工单 (Zip)",
+                            label="📦 方式2: 下载每日工单包 (员工用)",
                             data=buffer_zip.getvalue(),
                             file_name="ABC_Daily_Work_Orders.zip",
                             mime="application/zip",
-                            help="解压后每天一个独立Excel，直接分发给员工"
+                            help="解压后每天一个独立Excel，含A-N列详细信息。"
                         )
 
     except Exception as e:
