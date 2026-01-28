@@ -7,7 +7,7 @@ import zipfile
 
 # --- 页面配置 ---
 st.set_page_config(page_title="ABC", layout="wide") 
-st.title("ABC 排单系统 (Sheet2表头修正版)")
+st.title("ABC 排单系统 (全面视觉升级版)")
 
 # --- 侧边栏：设置 ---
 with st.sidebar:
@@ -171,8 +171,11 @@ if uploaded_file and start_date <= end_date:
             df_tasks = xls_dict[sheet_names[0]]
             df_details = xls_dict[sheet_names[1]]
             
-            st.write("任务表预览:", df_tasks.head(1))
-            st.write("信息表预览:", df_details.head(1))
+            st.subheader("1. 任务表预览 (Sheet1)")
+            st.dataframe(df_tasks, use_container_width=True, height=200)
+            
+            st.subheader("2. 信息表预览 (Sheet2)")
+            st.dataframe(df_details, use_container_width=True, height=200)
             
             product_info_map = {}
             for _, row in df_details.iterrows():
@@ -187,21 +190,57 @@ if uploaded_file and start_date <= end_date:
                     st.success("计算完成！")
                     
                     # ---------------------------------------------------------
-                    # 1. 纯排单汇总表 (管理用)
+                    # 1. 纯排单汇总表 (管理用) - 【已添加斑马纹可视化】
                     # ---------------------------------------------------------
                     buffer_sched = BytesIO()
                     with pd.ExcelWriter(buffer_sched, engine='xlsxwriter') as writer:
                         wb = writer.book
-                        center_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1})
+                        
+                        # 定义格式
+                        header_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
+                        white_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#FFFFFF'})
+                        gray_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#F2F2F2'})
                         
                         for date_obj in date_list:
                             raw_data = results[date_obj]
                             day_str = format_date_str(date_obj)
+                            
                             if raw_data:
                                 df_schedule = pd.DataFrame(raw_data).sort_values(by="产品编号")
                                 df_schedule.insert(0, "序号", range(1, 1 + len(df_schedule)))
+                                
+                                # 1. 写入数据
                                 df_schedule.to_excel(writer, sheet_name=day_str, index=False)
-                                writer.sheets[day_str].set_column('A:F', 15, center_fmt)
+                                ws = writer.sheets[day_str]
+                                ws.set_column('A:F', 15, white_fmt) # 默认宽度
+                                
+                                # 2. 覆盖表头格式
+                                for c, val in enumerate(df_schedule.columns):
+                                    ws.write(0, c, val, header_fmt)
+                                
+                                # 3. 应用斑马纹逻辑
+                                current_product = None
+                                color_toggle = False
+                                
+                                # 遍历行 (df_schedule: 序号, 产品编号, 期间总单量, 主力账号, 替补1, 替补2)
+                                for r_idx, row in enumerate(df_schedule.itertuples(), 1):
+                                    # row[2] 是产品编号 (因为 row[0]=index, row[1]=序号, row[2]=产品编号)
+                                    product_code = row.产品编号
+                                    
+                                    if product_code != current_product:
+                                        current_product = product_code
+                                        color_toggle = not color_toggle
+                                    
+                                    row_fmt = gray_fmt if color_toggle else white_fmt
+                                    
+                                    # 写入这一行的所有单元格
+                                    ws.write(r_idx, 0, row.序号, row_fmt)
+                                    ws.write(r_idx, 1, row.产品编号, row_fmt)
+                                    ws.write(r_idx, 2, row.期间总单量, row_fmt)
+                                    ws.write(r_idx, 3, row.主力账号, row_fmt)
+                                    ws.write(r_idx, 4, row.替补账号1, row_fmt)
+                                    ws.write(r_idx, 5, row.替补账号2, row_fmt)
+                                    
                             else:
                                 pd.DataFrame().to_excel(writer, sheet_name=day_str)
 
@@ -264,14 +303,7 @@ if uploaded_file and start_date <= end_date:
                                 '最低价': 'first',
                                 '最高价': 'first'
                             })
-                            
-                            # 【核心修改 1】 重命名 '工单号' -> '产品数量' 和 'VENDOR ITEM ID' -> '自发货ID'
-                            df_sheet2.rename(columns={
-                                '工单号': '产品数量',
-                                'VENDOR ITEM ID': '自发货ID'  # 改名
-                            }, inplace=True)
-                            
-                            # 【核心修改 2】 调整列顺序, 使用新名字 '自发货ID'
+                            df_sheet2.rename(columns={'工单号': '产品数量', 'VENDOR ITEM ID': '自发货ID'}, inplace=True)
                             target_cols = ['产品数量', '产品代码', '环境序号', '橙火ID', 'PRODUCT ID', '自发货ID', '关键词', '品牌名称', '最低价', '最高价']
                             df_sheet2 = df_sheet2[target_cols]
                             
@@ -328,11 +360,8 @@ if uploaded_file and start_date <= end_date:
                                     fmt_d = orange_fmt if pd.notna(val_d) and str(val_d).strip() != "" else center_fmt
                                     ws2.write(r_idx, 3, val_d, fmt_d)
                                     
-                                    # PRODUCT ID
-                                    # df_sheet2.iloc[r_idx-1, 4] -> PRODUCT ID
                                     ws2.write(r_idx, 4, df_sheet2.iloc[r_idx-1, 4], center_fmt)
                                     
-                                    # 【核心修改 3】 F列: 自发货ID (原 VENDOR ITEM ID)
                                     val_f = df_sheet2.iloc[r_idx-1, 5] 
                                     fmt_f = blue_fmt if pd.notna(val_f) and str(val_f).strip() != "" else center_fmt
                                     ws2.write(r_idx, 5, val_f, fmt_f)
