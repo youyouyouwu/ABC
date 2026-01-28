@@ -7,7 +7,7 @@ import zipfile
 
 # --- 页面配置 ---
 st.set_page_config(page_title="ABC", layout="wide") 
-st.title("ABC 排单系统 (完美分工版)")
+st.title("ABC 排单系统 (表头修正版)")
 
 # --- 侧边栏：设置 ---
 with st.sidebar:
@@ -135,15 +135,22 @@ def convert_to_work_order_df(daily_data, product_info_map):
         
         new_row = [
             idx, pid, main_acc,
-            infos[0], infos[1], infos[2], infos[3], infos[4], infos[5], infos[6],
-            "", "", "", ""
+            infos[0], # D: 橙火ID (Sheet2 B列)
+            infos[1], # E: PRODUCT ID (Sheet2 C列)
+            infos[2], # F: VENDOR ITEM ID (Sheet2 D列)
+            infos[3], # G: 关键词 (Sheet2 E列)
+            infos[4], # H: 品牌名称 (Sheet2 F列)
+            infos[5], # I: 最低价 (Sheet2 G列)
+            infos[6], # J: 最高价 (Sheet2 H列)
+            "", "", "", "" # K-N 列留空
         ]
         final_rows.append(new_row)
-        
+    
+    # 【核心修改】这里更新了表头名称
     headers = [
         "工单号", "产品代码", "环境序号", 
-        "橙火ID", "橙火ID", "橙火ID", "橙火ID", "橙火ID", 
-        "ZUIDIJIA ", "最高价", 
+        "橙火ID", "PRODUCT ID", "VENDOR ITEM ID", "关键词", "品牌名称", 
+        "最低价", "最高价", 
         "付款账号", "金额", "结果", "下单时间"
     ]
     return pd.DataFrame(final_rows, columns=headers)
@@ -185,7 +192,6 @@ if uploaded_file and start_date <= end_date:
                         center_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1})
                         header_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
                         
-                        # 每日明细 (仅排单)
                         for date_obj in date_list:
                             raw_data = results[date_obj]
                             day_str = format_date_str(date_obj)
@@ -193,9 +199,8 @@ if uploaded_file and start_date <= end_date:
                             if raw_data:
                                 df_schedule = pd.DataFrame(raw_data).sort_values(by="产品编号")
                                 df_schedule.insert(0, "序号", range(1, 1 + len(df_schedule)))
-                                sheet_name = day_str # 直接用日期做表名，不再加(排单)后缀，因为没有工单表了
-                                df_schedule.to_excel(writer, sheet_name=sheet_name, index=False)
-                                writer.sheets[sheet_name].set_column('A:F', 15, center_fmt)
+                                df_schedule.to_excel(writer, sheet_name=day_str, index=False)
+                                writer.sheets[day_str].set_column('A:F', 15, center_fmt)
                             else:
                                 pd.DataFrame().to_excel(writer, sheet_name=day_str)
 
@@ -235,7 +240,7 @@ if uploaded_file and start_date <= end_date:
                             curr_col += 3
 
                     # ---------------------------------------------------------
-                    # 2. 独立工单 Zip
+                    # 2. 独立工单 Zip (表头已更新)
                     # ---------------------------------------------------------
                     buffer_zip = BytesIO()
                     with zipfile.ZipFile(buffer_zip, "w") as zf:
@@ -261,9 +266,6 @@ if uploaded_file and start_date <= end_date:
                             file_name = format_date_str(date_obj) + ".xlsx"
                             zf.writestr(file_name, buf_single.getvalue())
 
-                    # ---------------------------------------------------------
-                    # 下载按钮区域
-                    # ---------------------------------------------------------
                     st.markdown("---")
                     col1, col2 = st.columns(2)
                     with col1:
@@ -272,7 +274,7 @@ if uploaded_file and start_date <= end_date:
                             data=buffer_sched.getvalue(),
                             file_name="ABC_Schedule_Only.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            help="只包含排单明细 + 汇总统计，不包含工单。"
+                            help="排单明细 + 汇总复核"
                         )
                     with col2:
                         st.download_button(
@@ -280,7 +282,7 @@ if uploaded_file and start_date <= end_date:
                             data=buffer_zip.getvalue(),
                             file_name="ABC_Daily_Work_Orders.zip",
                             mime="application/zip",
-                            help="解压后每天一个独立Excel，含A-N列详细信息。"
+                            help="解压后每天一个文件，表头已更新"
                         )
 
     except Exception as e:
