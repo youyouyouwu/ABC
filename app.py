@@ -1,14 +1,14 @@
 import streamlit as st
 import pandas as pd
 import random
+import openpyxl 
 from io import BytesIO
 from datetime import datetime, timedelta
 import zipfile
-import traceback  # 新增：用于捕获详细报错信息
 
 # --- 页面配置 ---
 st.set_page_config(page_title="ABC", layout="wide") 
-st.title("ABC 排单系统 (防抖防错版)")
+st.title("ABC 排单系统 (防错稳定版)")
 
 # --- 侧边栏：设置 ---
 with st.sidebar:
@@ -67,27 +67,23 @@ def generate_smart_schedule(df_tasks, date_list):
     
     tasks = []
     for _, row in df_tasks.iterrows():
-        # 【安全防护】跳过完全空白的行或没有数量的行
-        if pd.isna(row[0]) or pd.isna(row[1]):
+        # 【修复点】使用 row.iloc[0] 替代 row[0] 避免 KeyError
+        if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "":
             continue
             
-        pid = str(row[0]).strip()
-        
-        # 【安全防护】防止数量列包含文本或无法转换的格式
+        pid = str(row.iloc[0]).strip()
         try:
-            total_qty = int(float(row[1])) 
-        except ValueError:
-            st.warning(f"⚠️ 警告：产品 '{pid}' 的数量格式不正确 ('{row[1]}')，已自动跳过该品。")
-            continue
+            total_qty = int(row.iloc[1])
+        except (ValueError, TypeError):
+            continue 
             
         if total_qty > len(main_accounts):
             st.error(f"错误：产品 {pid} 的总单量 ({total_qty}) 超过了主力账号总数！")
             return None
-            
         tasks.append({'id': pid, 'total': total_qty})
 
     if not tasks:
-        st.error("未能从表格中读取到有效的产品任务，请检查 Sheet1。")
+        st.error("没有找到有效的排单任务，请检查表格内容。")
         return None
 
     random.shuffle(tasks)
@@ -158,13 +154,7 @@ def convert_to_work_order_df(daily_data, product_info_map):
         
         new_row = [
             idx, pid, main_acc,
-            infos[0], # 橙火ID
-            infos[1], # PRODUCT ID
-            infos[2], # VENDOR ITEM ID
-            infos[3], # 关键词
-            infos[4], # 品牌名称
-            infos[5], # 最低价
-            infos[6], # 最高价
+            infos[0], infos[1], infos[2], infos[3], infos[4], infos[5], infos[6],
             "", "", "", ""
         ]
         final_rows.append(new_row)
@@ -187,10 +177,8 @@ if uploaded_file and start_date <= end_date:
             st.error("Excel 必须包含至少两个 Sheet！")
         else:
             sheet_names = list(xls_dict.keys())
-            
-            # 【安全防护】dropna(how='all') 直接剔除表格末尾的幽灵空行
-            df_tasks = xls_dict[sheet_names[0]].dropna(how='all')
-            df_details = xls_dict[sheet_names[1]].dropna(how='all')
+            df_tasks = xls_dict[sheet_names[0]]
+            df_details = xls_dict[sheet_names[1]]
             
             st.subheader("1. 任务表预览 (Sheet1)")
             st.dataframe(df_tasks, use_container_width=True, height=200)
@@ -200,17 +188,14 @@ if uploaded_file and start_date <= end_date:
             
             product_info_map = {}
             for _, row in df_details.iterrows():
-                if pd.isna(row[0]): continue # 略过空行
-                p_code = str(row[0]).strip()
-                
-                # 【安全防护】将缺失的数据转为空字符串，防止写入Excel时报错
-                details = ["" if pd.isna(x) else x for x in row.iloc[1:8].tolist()]
-                
-                # 【安全防护】强化金额提取，防止带有逗号或文字的数字崩溃
+                # 【修复点】使用 row.iloc 严格按位置读取，防止 KeyError
+                if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "":
+                    continue
+                p_code = str(row.iloc[0]).strip()
+                details = row.iloc[1:8].tolist()
                 try:
-                    price_str = str(row.iloc[8]).replace(',', '').strip()
-                    price_val = float(price_str) if price_str and price_str.lower() != 'nan' else 0.0
-                except Exception:
+                    price_val = float(row.iloc[8])
+                except (IndexError, ValueError, TypeError):
                     price_val = 0.0
                 
                 product_info_map[p_code] = {
@@ -226,7 +211,7 @@ if uploaded_file and start_date <= end_date:
                     st.success("计算完成！")
                     
                     # ---------------------------------------------------------
-                    # 1. 纯排单汇总表 (管理用) 
+                    # 1. 纯排单汇总表 (管理用)
                     # ---------------------------------------------------------
                     buffer_sched = BytesIO()
                     with pd.ExcelWriter(buffer_sched, engine='xlsxwriter') as writer:
@@ -243,7 +228,6 @@ if uploaded_file and start_date <= end_date:
                             if raw_data:
                                 df_schedule = pd.DataFrame(raw_data).sort_values(by="产品编号")
                                 df_schedule.insert(0, "序号", range(1, 1 + len(df_schedule)))
-                                
                                 df_schedule["金额"] = df_schedule["产品编号"].apply(lambda x: product_info_map.get(x, {}).get('price', 0))
 
                                 df_schedule.to_excel(writer, sheet_name=day_str, index=False)
@@ -431,11 +415,8 @@ if uploaded_file and start_date <= end_date:
                             data=buffer_zip.getvalue(),
                             file_name="ABC_Daily_Work_Orders.zip",
                             mime="application/zip",
-                            help="Sheet1灰白分段，Sheet2 F列为自发货ID"
+                            help="每天独立文件，解压后直接发给别人"
                         )
 
     except Exception as e:
-        st.error(f"❌ 程序遇到报错: {e}")
-        # 如果再次遇到报错，点击折叠面板可以查看到底是哪行代码坏了
-        with st.expander("点击查看详细故障原因 (可截图给技术支持)"):
-            st.code(traceback.format_exc())
+        st.error(f"程序出错: {e}")
