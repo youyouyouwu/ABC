@@ -4,10 +4,11 @@ import random
 from io import BytesIO
 from datetime import datetime, timedelta
 import zipfile
+import traceback  # 新增：用于捕获详细报错信息
 
 # --- 页面配置 ---
 st.set_page_config(page_title="ABC", layout="wide") 
-st.title("ABC 排单系统 (财务汇总版)")
+st.title("ABC 排单系统 (防抖防错版)")
 
 # --- 侧边栏：设置 ---
 with st.sidebar:
@@ -66,12 +67,28 @@ def generate_smart_schedule(df_tasks, date_list):
     
     tasks = []
     for _, row in df_tasks.iterrows():
+        # 【安全防护】跳过完全空白的行或没有数量的行
+        if pd.isna(row[0]) or pd.isna(row[1]):
+            continue
+            
         pid = str(row[0]).strip()
-        total_qty = int(row[1])
+        
+        # 【安全防护】防止数量列包含文本或无法转换的格式
+        try:
+            total_qty = int(float(row[1])) 
+        except ValueError:
+            st.warning(f"⚠️ 警告：产品 '{pid}' 的数量格式不正确 ('{row[1]}')，已自动跳过该品。")
+            continue
+            
         if total_qty > len(main_accounts):
             st.error(f"错误：产品 {pid} 的总单量 ({total_qty}) 超过了主力账号总数！")
             return None
+            
         tasks.append({'id': pid, 'total': total_qty})
+
+    if not tasks:
+        st.error("未能从表格中读取到有效的产品任务，请检查 Sheet1。")
+        return None
 
     random.shuffle(tasks)
     num_days = len(date_list)
@@ -135,9 +152,7 @@ def convert_to_work_order_df(daily_data, product_info_map):
         pid = row.产品编号
         main_acc = row.主力账号
         
-        # 获取基础信息
         info_data = product_info_map.get(pid, {})
-        # info_list 是 B-H 列 (7个)
         infos = info_data.get('details', [""] * 7)
         if len(infos) < 7: infos += [""] * (7 - len(infos))
         
@@ -172,8 +187,10 @@ if uploaded_file and start_date <= end_date:
             st.error("Excel 必须包含至少两个 Sheet！")
         else:
             sheet_names = list(xls_dict.keys())
-            df_tasks = xls_dict[sheet_names[0]]
-            df_details = xls_dict[sheet_names[1]]
+            
+            # 【安全防护】dropna(how='all') 直接剔除表格末尾的幽灵空行
+            df_tasks = xls_dict[sheet_names[0]].dropna(how='all')
+            df_details = xls_dict[sheet_names[1]].dropna(how='all')
             
             st.subheader("1. 任务表预览 (Sheet1)")
             st.dataframe(df_tasks, use_container_width=True, height=200)
@@ -181,17 +198,19 @@ if uploaded_file and start_date <= end_date:
             st.subheader("2. 信息表预览 (Sheet2)")
             st.dataframe(df_details, use_container_width=True, height=200)
             
-            # 【核心修改】读取 I 列 (金额)
-            # 建立更详细的字典: {产品: {'details': [B-H], 'price': I列数值}}
             product_info_map = {}
             for _, row in df_details.iterrows():
+                if pd.isna(row[0]): continue # 略过空行
                 p_code = str(row[0]).strip()
-                # 基础信息 B-H (索引 1-7)
-                details = row.iloc[1:8].tolist()
-                # 价格信息 I (索引 8) - 如果没有则默认为0
+                
+                # 【安全防护】将缺失的数据转为空字符串，防止写入Excel时报错
+                details = ["" if pd.isna(x) else x for x in row.iloc[1:8].tolist()]
+                
+                # 【安全防护】强化金额提取，防止带有逗号或文字的数字崩溃
                 try:
-                    price_val = float(row.iloc[8])
-                except (IndexError, ValueError):
+                    price_str = str(row.iloc[8]).replace(',', '').strip()
+                    price_val = float(price_str) if price_str and price_str.lower() != 'nan' else 0.0
+                except Exception:
                     price_val = 0.0
                 
                 product_info_map[p_code] = {
@@ -207,13 +226,12 @@ if uploaded_file and start_date <= end_date:
                     st.success("计算完成！")
                     
                     # ---------------------------------------------------------
-                    # 1. 纯排单汇总表 (管理用) - 【已添加金额汇总】
+                    # 1. 纯排单汇总表 (管理用) 
                     # ---------------------------------------------------------
                     buffer_sched = BytesIO()
                     with pd.ExcelWriter(buffer_sched, engine='xlsxwriter') as writer:
                         wb = writer.book
                         
-                        # 定义格式
                         header_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
                         white_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#FFFFFF'})
                         gray_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#F2F2F2'})
@@ -226,42 +244,34 @@ if uploaded_file and start_date <= end_date:
                                 df_schedule = pd.DataFrame(raw_data).sort_values(by="产品编号")
                                 df_schedule.insert(0, "序号", range(1, 1 + len(df_schedule)))
                                 
-                                # 【核心修改】新增 G 列：金额
-                                # 根据产品编号从 product_info_map 获取价格
                                 df_schedule["金额"] = df_schedule["产品编号"].apply(lambda x: product_info_map.get(x, {}).get('price', 0))
 
-                                # 1. 写入数据
                                 df_schedule.to_excel(writer, sheet_name=day_str, index=False)
                                 ws = writer.sheets[day_str]
                                 ws.set_column('A:F', 15, white_fmt) 
-                                ws.set_column('G:G', 15, white_fmt) # 金额列
+                                ws.set_column('G:G', 15, white_fmt) 
                                 
-                                # 2. 覆盖表头格式
                                 for c, val in enumerate(df_schedule.columns):
                                     ws.write(0, c, val, header_fmt)
                                 
-                                # 3. 应用斑马纹逻辑
                                 current_product = None
                                 color_toggle = False
                                 
                                 for r_idx, row in enumerate(df_schedule.itertuples(), 1):
                                     product_code = row.产品编号
-                                    
                                     if product_code != current_product:
                                         current_product = product_code
                                         color_toggle = not color_toggle
                                     
                                     row_fmt = gray_fmt if color_toggle else white_fmt
                                     
-                                    # 写入所有单元格 (A-G)
-                                    # 序号, 产品, 总量, 主力, 替补1, 替补2, 金额
                                     ws.write(r_idx, 0, row.序号, row_fmt)
                                     ws.write(r_idx, 1, row.产品编号, row_fmt)
                                     ws.write(r_idx, 2, row.期间总单量, row_fmt)
                                     ws.write(r_idx, 3, row.主力账号, row_fmt)
                                     ws.write(r_idx, 4, row.替补账号1, row_fmt)
                                     ws.write(r_idx, 5, row.替补账号2, row_fmt)
-                                    ws.write(r_idx, 6, row.金额, row_fmt) # 新增金额列写入
+                                    ws.write(r_idx, 6, row.金额, row_fmt) 
                                     
                             else:
                                 pd.DataFrame().to_excel(writer, sheet_name=day_str)
@@ -303,11 +313,9 @@ if uploaded_file and start_date <= end_date:
                                     ws_summary.write(r_idx+1, curr_col+2, qty, c_fmt)
                                 
                                 total_row = len(sum_df) + 1
-                                # 写入当日合计 (数量)
                                 ws_summary.write(total_row, curr_col+1, "当日合计", h_fmt)
                                 ws_summary.write(total_row, curr_col+2, sum_df['当日总单量'].sum(), tot_fmt)
                                 
-                                # 【核心修改】写入总金额 (换一行)
                                 money_row = total_row + 1
                                 ws_summary.write(money_row, curr_col+1, "总金额", h_fmt)
                                 ws_summary.write(money_row, curr_col+2, daily_total_money, tot_fmt)
@@ -324,10 +332,8 @@ if uploaded_file and start_date <= end_date:
                             raw_data = results[date_obj]
                             if not raw_data: continue
                             
-                            # 1. 生成 Sheet1 数据
                             df_sheet1 = convert_to_work_order_df(raw_data, product_info_map)
                             
-                            # 2. 生成 Sheet2 数据 (聚合)
                             df_sheet2 = df_sheet1.groupby('产品代码', as_index=False).agg({
                                 '工单号': 'count',
                                 '环境序号': lambda x: "",
@@ -343,7 +349,6 @@ if uploaded_file and start_date <= end_date:
                             target_cols = ['产品数量', '产品代码', '环境序号', '橙火ID', 'PRODUCT ID', '自发货ID', '关键词', '品牌名称', '最低价', '最高价']
                             df_sheet2 = df_sheet2[target_cols]
                             
-                            # 3. 写入 Excel
                             buf_single = BytesIO()
                             with pd.ExcelWriter(buf_single, engine='xlsxwriter') as writer:
                                 wb = writer.book
@@ -430,4 +435,7 @@ if uploaded_file and start_date <= end_date:
                         )
 
     except Exception as e:
-        st.error(f"程序出错: {e}")
+        st.error(f"❌ 程序遇到报错: {e}")
+        # 如果再次遇到报错，点击折叠面板可以查看到底是哪行代码坏了
+        with st.expander("点击查看详细故障原因 (可截图给技术支持)"):
+            st.code(traceback.format_exc())
