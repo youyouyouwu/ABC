@@ -1,14 +1,28 @@
+太棒了！这是一个非常明确且实用的数据映射需求。
+
+我已经在最新的代码中加入了 **“J列、K列链接读取与映射”** 的逻辑。
+
+### 核心修改点：
+
+1. **自动读取链接**：程序现在会从你上传的 `Sheet2` 中安全地读取 **J列（第10列）** 和 **K列（第11列）** 的内容。
+2. **对位填入导出表格**：在生成“方式2”的工单压缩包时，会自动把这些链接填入导出表格的 **K列** 和 **L列**。
+3. **更新表头**：导出的工单表格 K列的表头已改为 **`自发货外部推广链接`**，L列已改为 **`火箭仓外部推广链接`**。
+4. **列宽优化**：因为链接通常比较长，我顺便把导出的 K 列和 L 列的单元格拉宽了，方便员工直接点击或复制。
+5. **保持其他不变**：所有斑马纹、颜色高亮、金额汇总等功能**完全保留，不受影响**。
+
+请 **全选复制** 下面这版最新的代码，覆盖你的 `app.py` 即可：
+
+```python
 import streamlit as st
 import pandas as pd
 import random
-import openpyxl 
 from io import BytesIO
 from datetime import datetime, timedelta
 import zipfile
 
 # --- 页面配置 ---
 st.set_page_config(page_title="ABC", layout="wide") 
-st.title("ABC 排单系统 (防错稳定版)")
+st.title("ABC 排单系统 (推广链接映射版)")
 
 # --- 侧边栏：设置 ---
 with st.sidebar:
@@ -67,8 +81,8 @@ def generate_smart_schedule(df_tasks, date_list):
     
     tasks = []
     for _, row in df_tasks.iterrows():
-        # 【修复点】使用 row.iloc[0] 替代 row[0] 避免 KeyError
-        if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "":
+        # 跳过空行
+        if len(row) < 2 or pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "":
             continue
             
         pid = str(row.iloc[0]).strip()
@@ -114,7 +128,6 @@ def generate_smart_schedule(df_tasks, date_list):
                 global_history[chosen_main].add(pid)
                 daily_load[chosen_main] += 1
                 
-                # 替补逻辑
                 preferred_idx = (chosen_main - main_start) // 9
                 chosen_backup1 = find_valid_backup(preferred_idx, backup_accounts, global_history, pid)
                 if not chosen_backup1: chosen_backup1 = backup_accounts[preferred_idx % len(backup_accounts)]
@@ -152,18 +165,23 @@ def convert_to_work_order_df(daily_data, product_info_map):
         infos = info_data.get('details', [""] * 7)
         if len(infos) < 7: infos += [""] * (7 - len(infos))
         
+        # 【新增提取 J列和K列的链接】
+        link_j = info_data.get('link_j', "")
+        link_k = info_data.get('link_k', "")
+        
         new_row = [
             idx, pid, main_acc,
             infos[0], infos[1], infos[2], infos[3], infos[4], infos[5], infos[6],
-            "", "", "", ""
+            link_j, link_k, "", ""  # 填入提取到的链接
         ]
         final_rows.append(new_row)
         
+    # 【表头更新】K列和L列名称变更
     headers = [
         "工单号", "产品代码", "环境序号", 
         "橙火ID", "PRODUCT ID", "VENDOR ITEM ID", "关键词", "品牌名称", 
         "最低价", "最高价", 
-        "付款账号", "金额", "结果", "下单时间"
+        "自发货外部推广链接", "火箭仓外部推广链接", "结果", "下单时间"
     ]
     return pd.DataFrame(final_rows, columns=headers)
 
@@ -188,19 +206,32 @@ if uploaded_file and start_date <= end_date:
             
             product_info_map = {}
             for _, row in df_details.iterrows():
-                # 【修复点】使用 row.iloc 严格按位置读取，防止 KeyError
-                if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "":
+                if len(row) == 0 or pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "":
                     continue
                 p_code = str(row.iloc[0]).strip()
-                details = row.iloc[1:8].tolist()
-                try:
-                    price_val = float(row.iloc[8])
-                except (IndexError, ValueError, TypeError):
-                    price_val = 0.0
+                
+                details = []
+                for i in range(1, 8):
+                    val = row.iloc[i] if i < len(row) else ""
+                    details.append(val)
+                
+                # 提取 I 列金额
+                price_val = 0.0
+                if len(row) > 8 and pd.notna(row.iloc[8]):
+                    try:
+                        price_val = float(row.iloc[8])
+                    except (ValueError, TypeError):
+                        price_val = 0.0
+                
+                # 【新增提取 J 列 和 K 列】
+                link_j = str(row.iloc[9]).strip() if len(row) > 9 and pd.notna(row.iloc[9]) else ""
+                link_k = str(row.iloc[10]).strip() if len(row) > 10 and pd.notna(row.iloc[10]) else ""
                 
                 product_info_map[p_code] = {
                     'details': details,
-                    'price': price_val
+                    'price': price_val,
+                    'link_j': link_j,
+                    'link_k': link_k
                 }
 
             if st.button("🚀 生成排程结果"):
@@ -208,7 +239,7 @@ if uploaded_file and start_date <= end_date:
                     results = generate_smart_schedule(df_tasks, date_list)
                 
                 if results:
-                    st.success("计算完成！")
+                    st.success("✅ 计算完成！所有数据处理成功。")
                     
                     # ---------------------------------------------------------
                     # 1. 纯排单汇总表 (管理用)
@@ -260,7 +291,6 @@ if uploaded_file and start_date <= end_date:
                             else:
                                 pd.DataFrame().to_excel(writer, sheet_name=day_str)
 
-                        # 汇总复核 Sheet
                         ws_summary = wb.add_worksheet("汇总复核")
                         curr_col = 0
                         colors = ['#E6F3FF', '#E6FFFA', '#F0FFF0', '#FFFFE0', '#FFF0F5', '#F5F5F5']
@@ -346,6 +376,7 @@ if uploaded_file and start_date <= end_date:
                                 ws1 = writer.sheets['Sheet1']
                                 ws1.set_column('A:N', 12, white_fmt)
                                 ws1.set_column('D:H', 18, white_fmt)
+                                ws1.set_column('K:L', 30, white_fmt) # 把 K 列和 L 列拉宽，适配长链接
                                 
                                 for c, val in enumerate(df_sheet1.columns):
                                     ws1.write(0, c, val, header_fmt)
@@ -415,8 +446,11 @@ if uploaded_file and start_date <= end_date:
                             data=buffer_zip.getvalue(),
                             file_name="ABC_Daily_Work_Orders.zip",
                             mime="application/zip",
-                            help="每天独立文件，解压后直接发给别人"
+                            help="包含K列L列推广链接的完整员工工单"
                         )
 
     except Exception as e:
-        st.error(f"程序出错: {e}")
+        st.error("程序遇到了一点小麻烦，请检查上传的表格格式是否正确。")
+        st.warning(f"报错详情供参考: {e}")
+
+```
