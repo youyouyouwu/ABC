@@ -7,7 +7,7 @@ import zipfile
 
 # --- 页面配置 ---
 st.set_page_config(page_title="ABC", layout="wide") 
-st.title("ABC 排单系统 (链接导入Sheet2修正版)")
+st.title("ABC 排单系统 (推广链接映射版)")
 
 # --- 侧边栏：设置 ---
 with st.sidebar:
@@ -66,6 +66,7 @@ def generate_smart_schedule(df_tasks, date_list):
     
     tasks = []
     for _, row in df_tasks.iterrows():
+        # 跳过空行
         if len(row) < 2 or pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "":
             continue
             
@@ -149,19 +150,23 @@ def convert_to_work_order_df(daily_data, product_info_map):
         infos = info_data.get('details', [""] * 7)
         if len(infos) < 7: infos += [""] * (7 - len(infos))
         
-        # 【完全复原 Sheet1】保持原来的 14 列，不在这里加链接
+        # 【新增提取 J列和K列的链接】
+        link_j = info_data.get('link_j', "")
+        link_k = info_data.get('link_k', "")
+        
         new_row = [
             idx, pid, main_acc,
             infos[0], infos[1], infos[2], infos[3], infos[4], infos[5], infos[6],
-            "", "", "", ""
+            link_j, link_k, "", ""  # 填入提取到的链接
         ]
         final_rows.append(new_row)
         
+    # 【表头更新】K列和L列名称变更
     headers = [
         "工单号", "产品代码", "环境序号", 
         "橙火ID", "PRODUCT ID", "VENDOR ITEM ID", "关键词", "品牌名称", 
         "最低价", "最高价", 
-        "付款账号", "金额", "结果", "下单时间"
+        "自发货外部推广链接", "火箭仓外部推广链接", "结果", "下单时间"
     ]
     return pd.DataFrame(final_rows, columns=headers)
 
@@ -195,6 +200,7 @@ if uploaded_file and start_date <= end_date:
                     val = row.iloc[i] if i < len(row) else ""
                     details.append(val)
                 
+                # 提取 I 列金额
                 price_val = 0.0
                 if len(row) > 8 and pd.notna(row.iloc[8]):
                     try:
@@ -202,7 +208,7 @@ if uploaded_file and start_date <= end_date:
                     except (ValueError, TypeError):
                         price_val = 0.0
                 
-                # 读取 J 列 和 K 列链接
+                # 【新增提取 J 列 和 K 列】
                 link_j = str(row.iloc[9]).strip() if len(row) > 9 and pd.notna(row.iloc[9]) else ""
                 link_k = str(row.iloc[10]).strip() if len(row) > 10 and pd.notna(row.iloc[10]) else ""
                 
@@ -317,7 +323,7 @@ if uploaded_file and start_date <= end_date:
                             curr_col += 3
 
                     # ---------------------------------------------------------
-                    # 2. 独立工单 Zip (将链接放到 Sheet2)
+                    # 2. 独立工单 Zip
                     # ---------------------------------------------------------
                     buffer_zip = BytesIO()
                     with zipfile.ZipFile(buffer_zip, "w") as zf:
@@ -325,10 +331,8 @@ if uploaded_file and start_date <= end_date:
                             raw_data = results[date_obj]
                             if not raw_data: continue
                             
-                            # 生成原汁原味的 Sheet1
                             df_sheet1 = convert_to_work_order_df(raw_data, product_info_map)
                             
-                            # 聚合生成 Sheet2
                             df_sheet2 = df_sheet1.groupby('产品代码', as_index=False).agg({
                                 '工单号': 'count',
                                 '环境序号': lambda x: "",
@@ -341,13 +345,7 @@ if uploaded_file and start_date <= end_date:
                                 '最高价': 'first'
                             })
                             df_sheet2.rename(columns={'工单号': '产品数量', 'VENDOR ITEM ID': '自发货ID'}, inplace=True)
-                            
-                            # 【核心修正】在 Sheet2 提取链接信息并加在最后
-                            df_sheet2['自发货外部推广链接'] = df_sheet2['产品代码'].apply(lambda x: product_info_map.get(x, {}).get('link_j', ''))
-                            df_sheet2['火箭仓外部推广链接'] = df_sheet2['产品代码'].apply(lambda x: product_info_map.get(x, {}).get('link_k', ''))
-                            
-                            # Sheet2 包含A-L共12列
-                            target_cols = ['产品数量', '产品代码', '环境序号', '橙火ID', 'PRODUCT ID', '自发货ID', '关键词', '品牌名称', '最低价', '最高价', '自发货外部推广链接', '火箭仓外部推广链接']
+                            target_cols = ['产品数量', '产品代码', '环境序号', '橙火ID', 'PRODUCT ID', '自发货ID', '关键词', '品牌名称', '最低价', '最高价']
                             df_sheet2 = df_sheet2[target_cols]
                             
                             buf_single = BytesIO()
@@ -358,11 +356,12 @@ if uploaded_file and start_date <= end_date:
                                 white_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#FFFFFF'})
                                 gray_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#F2F2F2'})
                                 
-                                # --- 写入 Sheet1 (完全原样，不包含链接) ---
+                                # --- Sheet1 ---
                                 df_sheet1.to_excel(writer, sheet_name='Sheet1', index=False)
                                 ws1 = writer.sheets['Sheet1']
                                 ws1.set_column('A:N', 12, white_fmt)
                                 ws1.set_column('D:H', 18, white_fmt)
+                                ws1.set_column('K:L', 30, white_fmt) # 把 K 列和 L 列拉宽，适配长链接
                                 
                                 for c, val in enumerate(df_sheet1.columns):
                                     ws1.write(0, c, val, header_fmt)
@@ -381,13 +380,11 @@ if uploaded_file and start_date <= end_date:
                                         if pd.isna(val): val = ""
                                         ws1.write(r_idx, c_idx, val, row_fmt)
 
-                                # --- 写入 Sheet2 (包含 K/L 链接) ---
+                                # --- Sheet2 ---
                                 df_sheet2.to_excel(writer, sheet_name='Sheet2', index=False)
                                 ws2 = writer.sheets['Sheet2']
                                 center_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1})
-                                
                                 ws2.set_column('A:J', 15, center_fmt)
-                                ws2.set_column('K:L', 30, center_fmt) # 把链接列 K 和 L 拉宽
                                 
                                 orange_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#FFC000'}) 
                                 blue_fmt = wb.add_format({'align': 'center', 'valign': 'vcenter', 'border': 1, 'bg_color': '#CCECFF'})
@@ -414,9 +411,6 @@ if uploaded_file and start_date <= end_date:
                                     ws2.write(r_idx, 7, df_sheet2.iloc[r_idx-1, 7], center_fmt)
                                     ws2.write(r_idx, 8, df_sheet2.iloc[r_idx-1, 8], center_fmt)
                                     ws2.write(r_idx, 9, df_sheet2.iloc[r_idx-1, 9], center_fmt)
-                                    # 写入 K, L 链接列
-                                    ws2.write(r_idx, 10, df_sheet2.iloc[r_idx-1, 10], center_fmt)
-                                    ws2.write(r_idx, 11, df_sheet2.iloc[r_idx-1, 11], center_fmt)
                             
                             file_name = format_date_str(date_obj) + ".xlsx"
                             zf.writestr(file_name, buf_single.getvalue())
@@ -437,7 +431,7 @@ if uploaded_file and start_date <= end_date:
                             data=buffer_zip.getvalue(),
                             file_name="ABC_Daily_Work_Orders.zip",
                             mime="application/zip",
-                            help="Sheet1完全复原，Sheet2包含K/L推广链接"
+                            help="包含K列L列推广链接的完整员工工单"
                         )
 
     except Exception as e:
